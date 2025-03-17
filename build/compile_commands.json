@@ -1,0 +1,7 @@
+[
+{
+  "directory": "/home/faruk/opencv_cpp_vscode/build",
+  "command": "/usr/bin/g++ -isystem /usr/include/opencv4 -g -o CMakeFiles/main.dir/main.cpp.o -c /home/faruk/opencv_cpp_vscode/main.cpp",
+  "file": "/home/faruk/opencv_cpp_vscode/main.cpp"
+}
+]

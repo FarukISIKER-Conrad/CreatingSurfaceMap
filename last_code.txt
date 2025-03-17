@@ -1,0 +1,55 @@
+#include <opencv2/opencv.hpp>
+#include <fstream>
+using namespace cv;
+using namespace std;
+
+int main() {
+    Mat data = (Mat_<float>(4, 5) << 
+        4095.0f, 4095.0f, 0.0f, 2048.0f, 2048.0f,
+        4095.0f, 2048.0f, 2048.0f, 2048.0f, 4095.0f,
+        4095.0f, 4095.0f, 4095.0f, 4095.0f, 4095.0f,
+        4095.0f, 4095.0f, 4095.0f, 4095.0f, 4095.0f
+    );
+
+    // Normalize the matrix manually using two for-loops
+    Mat scaledData = data.clone(); // Create a copy of the matrix for normalization
+
+    for (int i = 0; i < scaledData.rows; i++) {
+        for (int j = 0; j < scaledData.cols; j++) {
+            scaledData.at<float>(i, j) = scaledData.at<float>(i, j) / 4095.0f;
+        }
+    }
+
+    std::cout<< scaledData<<std::endl;
+    // Resize the data using INTER_NEAREST
+    Mat resizedHeatmap;
+    resize(scaledData, resizedHeatmap, Size(226, 226), 0, 0, INTER_CUBIC);
+
+
+    // Convert to 8-bit before applying colormap
+    Mat heatmap8U;
+    resizedHeatmap.convertTo(heatmap8U, CV_8U, 255.0);
+
+    // Apply the JET colormap
+    Mat heatmap;
+    applyColorMap(heatmap8U, heatmap, COLORMAP_JET);
+    // Save final matrix values to a text file
+    ofstream file("heatmap_values.txt");
+    if (file.is_open()) {
+        for (int i = 0; i < resizedHeatmap.rows; i++) {
+            for (int j = 0; j < resizedHeatmap.cols; j++) {
+                file << resizedHeatmap.at<float>(i, j) << " "; // Space-separated
+            }
+            file << endl; // New row
+        }
+        file.close();
+        cout << "Heatmap values saved to heatmap_values.txt" << endl;
+    } else {
+        cerr << "Error opening file!" << endl;
+    }
+    // Show the result
+    imshow("Heatmap", heatmap);
+    waitKey(0);
+    
+    return 0;
+}
