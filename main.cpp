@@ -24,6 +24,52 @@ struct Pixel {
     unsigned char r, g, b;
 };
 
+void showImage(const std::vector<std::vector<float>>& data, const std::string& windowName = "Image") {
+    if (data.empty() || data[0].empty()) {
+        std::cerr << "Error: Empty data!" << std::endl;
+        return;
+    }
+
+    int rows = data.size();
+    int cols = data[0].size();
+
+    // Convert vector to cv::Mat
+    cv::Mat img(rows, cols, CV_32F);
+    for (int i = 0; i < rows; ++i)
+        for (int j = 0; j < cols; ++j)
+            img.at<float>(i, j) = data[i][j];
+
+    // Normalize to 0-255 range
+    cv::normalize(img, img, 0, 255, cv::NORM_MINMAX);
+    img.convertTo(img, CV_8U);
+
+    // Show image
+    cv::imshow(windowName, img);
+    cv::waitKey(0);
+}
+std::vector<std::vector<float>> matToVector2D(const cv::Mat& mat) {
+    std::vector<std::vector<float>> vec(mat.rows, std::vector<float>(mat.cols));
+
+    for (int i = 0; i < mat.rows; i++) {
+        for (int j = 0; j < mat.cols; j++) {
+            vec[i][j] = mat.at<float>(i, j);
+        }
+    }
+    return vec;
+}
+cv::Mat vector2DToMat(const std::vector<std::vector<float>>& vec) {
+    if (vec.empty()) return cv::Mat(); // Return an empty Mat if input is empty
+
+    int rows = vec.size();
+    int cols = vec[0].size();
+    cv::Mat mat(rows, cols, CV_32F); // Create a float matrix
+
+    for (int i = 0; i < rows; i++) {
+        memcpy(mat.ptr<float>(i), vec[i].data(), cols * sizeof(float)); // Efficient row copy
+    }
+
+    return mat;
+}
 // BMP file header structure
 #pragma pack(push, 1)
 struct BMPFileHeader {
@@ -56,58 +102,202 @@ struct BMPColorMasks {
 };
 #pragma pack(pop)
 
+// Add this function before applyCustomColormap and call it in the color mapping process
+float remapValue(float value) {
+    // Apply a non-linear transformation to give more weight to low values
+    // This will expand the red area and compress the blue area
+    if (value < 0.5f) {
+        // Expand the lower half (red to green)
+        return value * 0.7f;
+    } else {
+        // Compress the upper half (green to blue)
+        return 0.35f + (value - 0.5f) * 1.3f;
+    }
+}
 // Create a custom resize function using bicubic interpolation
-std::vector<std::vector<float>> resizeBicubic(const std::vector<std::vector<float>>& input, int newWidth, int newHeight) {
-    int oldWidth = input[0].size();
-    int oldHeight = input.size();
+
+// Interpolation kernel
+float u(float s, float a) {
+    if ((std::abs(s) >= 0) && (std::abs(s) <= 1)) {
+        return (a + 2) * std::pow(std::abs(s), 3) - (a + 3) * std::pow(std::abs(s), 2) + 1;
+    } else if ((std::abs(s) > 1) && (std::abs(s) <= 2)) {
+        return a * std::pow(std::abs(s), 3) - (5 * a) * std::pow(std::abs(s), 2) + (8 * a) * std::abs(s) - 4 * a;
+    }
+    return 0;
+}
+
+// Padded image creation
+std::vector<std::vector<float>> padding(const std::vector<std::vector<float>>& img) {
+    int H = img.size();
+    int W = img[0].size();
     
-    std::vector<std::vector<float>> output(newHeight, std::vector<float>(newWidth, 0.0f));
+    // Create padded image with zeros
+    std::vector<std::vector<float>> zimg(H + 4, std::vector<float>(W + 4, 0.0f));
     
-    float scaleX = static_cast<float>(oldWidth) / newWidth;
-    float scaleY = static_cast<float>(oldHeight) / newHeight;
-    
-    auto cubic = [](float x) -> float {
-        float absx = std::abs(x);
-        if (absx <= 1.0f) {
-            return 1.5f * absx * absx * absx - 2.5f * absx * absx + 1.0f;
-        } else if (absx < 2.0f) {
-            return -0.5f * absx * absx * absx + 2.5f * absx * absx - 4.0f * absx + 2.0f;
-        }
-        return 0.0f;
-    };
-    
-    for (int y = 0; y < newHeight; y++) {
-        for (int x = 0; x < newWidth; x++) {
-            float srcX = x * scaleX;
-            float srcY = y * scaleY;
-            
-            int x0 = static_cast<int>(std::floor(srcX));
-            int y0 = static_cast<int>(std::floor(srcY));
-            
-            float sum = 0.0f;
-            float weightSum = 0.0f;
-            
-            for (int dy = -1; dy <= 2; dy++) {
-                for (int dx = -1; dx <= 2; dx++) {
-                    int nx = x0 + dx;
-                    int ny = y0 + dy;
-                    
-                    // Clamp to edge
-                    nx = std::max(0, std::min(oldWidth - 1, nx));
-                    ny = std::max(0, std::min(oldHeight - 1, ny));
-                    
-                    float weight = cubic(srcX - nx) * cubic(srcY - ny);
-                    sum += input[ny][nx] * weight;
-                    weightSum += weight;
-                }
-            }
-            
-            output[y][x] = sum / weightSum;
+    // Copy original image to center
+    for (int h = 0; h < H; h++) {
+        for (int w = 0; w < W; w++) {
+            zimg[h + 2][w + 2] = img[h][w];
         }
     }
     
+    // Pad the first/last two columns
+    for (int h = 0; h < H; h++) {
+        // Left columns
+        zimg[h + 2][0] = img[h][0];
+        zimg[h + 2][1] = img[h][0];
+        
+        // Right columns
+        zimg[h + 2][W + 2] = img[h][W - 1];
+        zimg[h + 2][W + 3] = img[h][W - 1];
+    }
+    
+    // Pad the first/last two rows
+    for (int w = 0; w < W; w++) {
+        // Top rows
+        zimg[0][w + 2] = img[0][w];
+        zimg[1][w + 2] = img[0][w];
+        
+        // Bottom rows
+        zimg[H + 2][w + 2] = img[H - 1][w];
+        zimg[H + 3][w + 2] = img[H - 1][w];
+    }
+    
+    // Pad the corners
+    // Top-left
+    zimg[0][0] = img[0][0];
+    zimg[0][1] = img[0][0];
+    zimg[1][0] = img[0][0];
+    zimg[1][1] = img[0][0];
+    
+    // Top-right
+    zimg[0][W + 2] = img[0][W - 1];
+    zimg[0][W + 3] = img[0][W - 1];
+    zimg[1][W + 2] = img[0][W - 1];
+    zimg[1][W + 3] = img[0][W - 1];
+    
+    // Bottom-left
+    zimg[H + 2][0] = img[H - 1][0];
+    zimg[H + 2][1] = img[H - 1][0];
+    zimg[H + 3][0] = img[H - 1][0];
+    zimg[H + 3][1] = img[H - 1][0];
+    
+    // Bottom-right
+    zimg[H + 2][W + 2] = img[H - 1][W - 1];
+    zimg[H + 2][W + 3] = img[H - 1][W - 1];
+    zimg[H + 3][W + 2] = img[H - 1][W - 1];
+    zimg[H + 3][W + 3] = img[H - 1][W - 1];
+    
+    return zimg;
+}
+
+// Bicubic matrix multiplication
+float computeBicubic(const std::vector<float>& row_kernel, 
+                     const std::vector<std::vector<float>>& pixel_values, 
+                     const std::vector<float>& col_kernel) {
+    // First multiply row_kernel with pixel_values
+    std::vector<float> temp(4, 0.0f);
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            temp[i] += row_kernel[j] * pixel_values[j][i];
+        }
+    }
+    
+    // Then multiply with col_kernel
+    float result = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        result += temp[i] * col_kernel[i];
+    }
+    
+    return result;
+}
+
+// Bicubic interpolation function with requested signature
+std::vector<std::vector<float>> resizeBicubic(const std::vector<std::vector<float>>& input, int newWidth, int newHeight) {
+    // Get original dimensions
+    int H = input.size();
+    int W = input[0].size();
+    
+    // Calculate scale ratios
+    float ratioH = static_cast<float>(newHeight) / H;
+    float ratioW = static_cast<float>(newWidth) / W;
+    
+    // Padding the image
+    std::vector<std::vector<float>> paddedInput = padding(input);
+    
+    // Create output image
+    std::vector<std::vector<float>> output(newHeight, std::vector<float>(newWidth, 0.0f));
+    
+    // Bicubic parameter
+    float a = -0.5f;
+    
+    // Inverse scaling factors
+    float h_h = 1.0f / ratioH;
+    float h_w = 1.0f / ratioW;
+    
+    std::cout << "Starting bicubic interpolation..." << std::endl;
+    
+    // Process each pixel in the output image
+    for (int j = 0; j < newHeight; j++) {
+        for (int i = 0; i < newWidth; i++) {
+            // Get the corresponding position in the original image
+            float y = j * h_h + 1.5f; // +2 because of padding
+            float x = i * h_w + 1.5f;
+            
+            // Calculate kernel weights for x
+            float x1 = 1 + x - std::floor(x);
+            float x2 = x - std::floor(x);
+            float x3 = std::floor(x) + 1 - x;
+            float x4 = std::floor(x) + 2 - x;
+            
+            // Calculate kernel weights for y
+            float y1 = 1 + y - std::floor(y);
+            float y2 = y - std::floor(y);
+            float y3 = std::floor(y) + 1 - y;
+            float y4 = std::floor(y) + 2 - y;
+            
+            // Kernel vectors
+            std::vector<float> row_kernel = {u(x1, a), u(x2, a), u(x3, a), u(x4, a)};
+            std::vector<float> col_kernel = {u(y1, a), u(y2, a), u(y3, a), u(y4, a)};
+            
+            // 4x4 grid of pixel values around the interpolation point
+            std::vector<std::vector<float>> pixel_values = {
+                {
+                    paddedInput[static_cast<int>(y-y1)][static_cast<int>(x-x1)],
+                    paddedInput[static_cast<int>(y-y2)][static_cast<int>(x-x1)],
+                    paddedInput[static_cast<int>(y+y3)][static_cast<int>(x-x1)],
+                    paddedInput[static_cast<int>(y+y4)][static_cast<int>(x-x1)]
+                },
+                {
+                    paddedInput[static_cast<int>(y-y1)][static_cast<int>(x-x2)],
+                    paddedInput[static_cast<int>(y-y2)][static_cast<int>(x-x2)],
+                    paddedInput[static_cast<int>(y+y3)][static_cast<int>(x-x2)],
+                    paddedInput[static_cast<int>(y+y4)][static_cast<int>(x-x2)]
+                },
+                {
+                    paddedInput[static_cast<int>(y-y1)][static_cast<int>(x+x3)],
+                    paddedInput[static_cast<int>(y-y2)][static_cast<int>(x+x3)],
+                    paddedInput[static_cast<int>(y+y3)][static_cast<int>(x+x3)],
+                    paddedInput[static_cast<int>(y+y4)][static_cast<int>(x+x3)]
+                },
+                {
+                    paddedInput[static_cast<int>(y-y1)][static_cast<int>(x+x4)],
+                    paddedInput[static_cast<int>(y-y2)][static_cast<int>(x+x4)],
+                    paddedInput[static_cast<int>(y+y3)][static_cast<int>(x+x4)],
+                    paddedInput[static_cast<int>(y+y4)][static_cast<int>(x+x4)]
+                }
+            };
+            
+            // Compute interpolated value using bicubic algorithm
+            output[j][i] = computeBicubic(row_kernel, pixel_values, col_kernel);
+        }
+    }
+    
+    std::cout << "Bicubic interpolation complete." << std::endl;
+    
     return output;
 }
+
 
 // Function to apply custom colormap based on the image's gradient
 Pixel applyCustomColormap(float value) {
@@ -155,127 +345,66 @@ uint16_t convertToRGB565(unsigned char r, unsigned char g, unsigned char b) {
     return (r5 << 11) | (g6 << 5) | b5;
 }
 
-// Function to save RGB565 data as a BMP file
-void saveRGB565AsBMP(const std::vector<std::vector<uint16_t>>& rgb565Data, const std::string& filename) {
-    int width = rgb565Data[0].size();
-    int height = rgb565Data.size();
-    
-    // BMP rows are padded to 4-byte boundaries
-    int rowPadding = (width * 2) % 4 == 0 ? 0 : 4 - ((width * 2) % 4);
-    int dataSize = (width * 2 + rowPadding) * height;
-    
-    // Create file headers
-    BMPFileHeader fileHeader = {
-        0x4D42,                              // 'BM' signature
-        static_cast<uint32_t>(54 + 12 + dataSize), // File size (54 bytes header + 12 bytes color masks + data)
-        0,                                   // Reserved
-        0,                                   // Reserved
-        54 + 12                              // Offset to pixel data (54 bytes header + 12 bytes color masks)
-    };
-    
-    BMPInfoHeader infoHeader = {
-        40,                                  // Header size
-        width,                               // Width
-        -height,                             // Height (negative for top-down)
-        1,                                   // Planes
-        16,                                  // Bits per pixel
-        3,                                   // Compression (BI_BITFIELDS)
-        static_cast<uint32_t>(dataSize),     // Image size
-        2835,                                // X pixels per meter (72 DPI)
-        2835,                                // Y pixels per meter (72 DPI)
-        0,                                   // Colors used
-        0                                    // Important colors
-    };
-    
-    BMPColorMasks colorMasks = {
-        0xF800,                              // Red mask (5 bits)
-        0x07E0,                              // Green mask (6 bits)
-        0x001F,                              // Blue mask (5 bits)
-        0x0000                               // Alpha mask (0 bits)
-    };
-    
-    // Open file for writing
-    std::ofstream file(filename, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "Error opening BMP file for writing" << std::endl;
-        return;
-    }
-    
-    // Write headers
-    file.write(reinterpret_cast<const char*>(&fileHeader), sizeof(fileHeader));
-    file.write(reinterpret_cast<const char*>(&infoHeader), sizeof(infoHeader));
-    file.write(reinterpret_cast<const char*>(&colorMasks), sizeof(colorMasks));
-    
-    // Write pixel data
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            uint16_t pixel = rgb565Data[y][x];
-            file.write(reinterpret_cast<const char*>(&pixel), 2);
-        }
-        
-        // Write row padding
-        if (rowPadding > 0) {
-            const char padding[4] = {0, 0, 0, 0};
-            file.write(padding, rowPadding);
-        }
-    }
-    
-    file.close();
-    std::cout << "RGB565 data saved as BMP file: " << filename << std::endl;
-}
 
 int main() {
-    // Initialize the data matrix manually (4x5)
-    std::vector<std::vector<float>> data = {
-        {4095.0f, 4095.0f, 0.0f, 2048.0f, 2048.0f},
-        {4095.0f, 2048.0f, 2048.0f, 2048.0f, 4095.0f},
-        {4095.0f, 4095.0f, 4095.0f, 4095.0f, 4095.0f},
-        {4095.0f, 4095.0f, 4095.0f, 4095.0f, 4095.0f}
-    };
+    // // Initialize the data matrix manually (4x5)
+    // std::vector<std::vector<float>> data = {
+    //     {0.0f   , 0.0f  , 0.0f   ,  0.0f   },
+    //     {2048.0f, 2048.0f, 2048.0f, 2048.0f},
+    //     {0.0f   , 0.0f  , 0.0f   ,  0.0f   }
+    // };
     
+    // Initialize the data matrix with a wider range of values
+    std::vector<std::vector<float>> data = {
+        {0.0f   , 0.0f  , 0.0f      ,0.0f },  
+        {0.0f   , 0.0f  , 0.0f      ,0.0f },     // Row 1: All zeros (normalized to 0.0) - RED
+        {0.0f   , 2048.0f  , 0.0f   ,0.0f},     // Row 2: All 2048 (normalized to 0.5) - GREEN
+        {0.0f   , 0.0f  , 0.0f      ,0.0f } 
+    };
     // Normalize the matrix manually
-    std::vector<std::vector<float>> scaledData(data.size(), std::vector<float>(data[0].size()));
+    std::vector<std::vector<float>> normalizedData(data.size(), std::vector<float>(data[0].size()));
     for (size_t i = 0; i < data.size(); i++) {
         for (size_t j = 0; j < data[i].size(); j++) {
-            scaledData[i][j] = data[i][j] / 4095.0f;
+            normalizedData[i][j] = data[i][j] / 4095.0f;
         }
     }
-    
+    //showImage(scaledData,"scaledData");
     // Print the scaled data
     std::cout << "Scaled data:" << std::endl;
-    for (const auto& row : scaledData) {
+    for (const auto& row : normalizedData) {
         for (float val : row) {
             std::cout << val << " ";
         }
         std::cout << std::endl;
     }
     
+
+    cv::Mat normalizedDataMat;
+    cv::Mat resizedHeatmapMat;
     // Resize the data using custom bicubic interpolation function
-    std::vector<std::vector<float>> resizedHeatmap = resizeBicubic(scaledData, 226, 226);
+    std::vector<std::vector<float>> resizedHeatmap = resizeBicubic(normalizedData, 226, 226);
+    showImage(resizedHeatmap,"resizedHeatmap Without CV");
+
+    normalizedDataMat = vector2DToMat(normalizedData);
+    cv::resize(normalizedDataMat, resizedHeatmapMat, cv::Size(226, 226), 0, 0, cv::INTER_CUBIC);
     
+    resizedHeatmap = matToVector2D(resizedHeatmapMat);
+    showImage(resizedHeatmap,"resizedHeatmap with cv");
+
+
+
+
+
     // Convert to 8-bit and apply colormap
     std::vector<std::vector<Pixel>> heatmap(226, std::vector<Pixel>(226));
     for (int i = 0; i < 226; i++) {
         for (int j = 0; j < 226; j++) {
-            heatmap[i][j] = applyCustomColormap(resizedHeatmap[i][j]);
+            // Then in your code, modify the applyCustomColormap call:
+            heatmap[i][j] = applyCustomColormap((resizedHeatmap[i][j]));
         }
     }
     
-    // Save final matrix values to a text file
-    std::ofstream file("heatmap_values.txt");
-    if (file.is_open()) {
-        for (size_t i = 0; i < resizedHeatmap.size(); i++) {
-            for (size_t j = 0; j < resizedHeatmap[i].size(); j++) {
-                file << resizedHeatmap[i][j] << " "; // Space-separated
-            }
-            file << std::endl; // New row
-        }
-        file.close();
-        std::cout << "Heatmap values saved to heatmap_values.txt" << std::endl;
-    } else {
-        std::cerr << "Error opening file!" << std::endl;
-    }
-    
+   
     // Create an OpenCV Mat from our heatmap data for display only
     cv::Mat displayImage(226, 226, CV_8UC3);
     for (int i = 0; i < 226; i++) {
@@ -285,38 +414,7 @@ int main() {
             displayImage.at<cv::Vec3b>(i, j)[2] = heatmap[i][j].r;
         }
     }
-    
-    // Convert to RGB565 format
-    std::vector<std::vector<uint16_t>> rgb565Data(226, std::vector<uint16_t>(226));
-    for (int i = 0; i < 226; i++) {
-        for (int j = 0; j < 226; j++) {
-            rgb565Data[i][j] = convertToRGB565(
-                heatmap[i][j].r,
-                heatmap[i][j].g,
-                heatmap[i][j].b
-            );
-        }
-    }
-    
-    // Save RGB565 data as BMP file
-    saveRGB565AsBMP(rgb565Data, "heatmap_rgb565.bmp");
-    
-    // Additionally save RGB565 data as hex values in a text file for reference
-    std::ofstream hexFile("heatmap_rgb565_hex.txt");
-    if (hexFile.is_open()) {
-        hexFile << std::hex;
-        for (size_t i = 0; i < rgb565Data.size(); i++) {
-            for (size_t j = 0; j < rgb565Data[i].size(); j++) {
-                hexFile << "0x" << std::setfill('0') << std::setw(4) 
-                       << rgb565Data[i][j] << " ";
-            }
-            hexFile << std::endl;
-        }
-        hexFile.close();
-        std::cout << "RGB565 hex values saved to heatmap_rgb565_hex.txt" << std::endl;
-    } else {
-        std::cerr << "Error opening hex file!" << std::endl;
-    }
+   
     
     // Show the result (using OpenCV as requested)
     cv::imshow("Heatmap", displayImage);
